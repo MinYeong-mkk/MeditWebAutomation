@@ -4,7 +4,8 @@ import pytest
 
 from Config.config import get_env_config
 from TestBase.webDriverSetup import create_driver
-
+from datetime import datetime
+from pytest_html import extras as html_extras
 
 SCREENSHOT_DIR = 'screenshots'
 
@@ -81,3 +82,48 @@ def driver(request):
         driver.save_screenshot(os.path.join(SCREENSHOT_DIR, filename))
 
     driver.quit()
+
+@pytest.fixture
+def extras(request):
+    """pytest-html extras fixture — TC별 유사도/이미지/에러 inject"""
+    _extras = []
+    yield _extras
+
+    # pytest-html이 report에 extras 붙이는 방식
+    if hasattr(request.node, "stash"):
+        from pytest_html.plugin import extras as stash_key
+        request.node.stash[stash_key] = _extras
+
+def pytest_html_report_title(report):
+    report.title = "Checkpoint QA Automation Report"
+
+
+def pytest_configure(config):
+    config._metadata = {
+        "Project": "Medit Checkpoint",
+        "Environment": config.getoption("--env", default="stage"),
+        "Executed": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def pytest_html_results_summary(prefix, summary, postfix):
+    from pytest_html import extras
+    prefix.extend([extras.html("""
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background: #f9f9f9; color: #222; }
+        #report-header { background: #fff; border-bottom: 3px solid #1a73e8; padding: 16px 24px; }
+        h1 { color: #1a73e8; font-size: 22px; margin: 0; }
+        #results-table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+        #results-table th {
+            background: #1a73e8; color: #fff;
+            padding: 10px 14px; text-align: left; font-size: 13px;
+        }
+        #results-table td { padding: 9px 14px; border-bottom: 1px solid #eee; font-size: 13px; }
+        #results-table tr:hover td { background: #f0f6ff; }
+        .passed { color: #fff; background: #34a853; border-radius: 4px; padding: 2px 10px; font-weight: 600; }
+        .failed { color: #fff; background: #ea4335; border-radius: 4px; padding: 2px 10px; font-weight: 600; }
+        .error  { color: #fff; background: #f29900; border-radius: 4px; padding: 2px 10px; font-weight: 600; }
+        div.extraHTML { padding: 8px 0; }
+        div.extraHTML div { border-left: 3px solid #1a73e8; padding-left: 12px; margin: 6px 0; }
+    </style>
+    """)])

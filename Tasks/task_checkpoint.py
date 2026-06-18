@@ -42,7 +42,9 @@ class CheckpointTask:
         caries_count: int,
         scan_type: str,
         diagnosis_name: str,
-        treatment_name: str
+        treatment_name: str,
+        baseline_image_paths: list[str] | None = None,  # 추가
+        extras: list | None = None,    
     ):
         """CheckPoint 작업 영역 진입"""
 
@@ -72,7 +74,9 @@ class CheckpointTask:
             caries_count=caries_count,
             scan_type=scan_type,
             diagnosis_name=diagnosis_name,
-            treatment_name=treatment_name
+            treatment_name=treatment_name,
+            baseline_image_paths=baseline_image_paths,
+            extras=extras,
         )
 
     def enter_edit_flow(
@@ -146,7 +150,9 @@ class CheckpointTask:
         caries_count: int,
         scan_type: str,
         diagnosis_name: str,
-        treatment_name: str
+        treatment_name: str,
+        baseline_image_paths: list[str] | None = None,
+        extras: list | None = None,
     ):
         """우식 popup 처리 또는 수동 capture 수행"""
 
@@ -178,6 +184,12 @@ class CheckpointTask:
         assert self.page.has_note_card_image(), (
             "Note card image should be visible after diagnosis/capture."
         )
+        # ★ 이미지 유사도 비교 (caries 자동 캡처 케이스만)
+        if caries_count > 0 and baseline_image_paths:
+            self._compare_note_card_images(
+                baseline_image_paths=baseline_image_paths,
+                extras=extras or [],
+            )
 
         self.complete_note_forms(
             card_count=expected_card_count,
@@ -185,6 +197,55 @@ class CheckpointTask:
             diagnosis_name=diagnosis_name,
             treatment_name=treatment_name
         )
+
+    def _compare_note_card_images(
+        self,
+        baseline_image_paths: list[str],
+        extras: list,
+    ):
+        """Note card thumbnail vs baseline 이미지 SSIM 비교"""
+        from Utils.image_comparator import (
+            capture_element_image,
+            load_baseline_image,
+            compare_images,
+            is_similar,
+            image_to_base64_src,
+            SSIM_THRESHOLD,
+        )
+        from pytest_html import extras as html_extras
+
+        note_card_elements = self.page.find_all_present(
+            self.page.NOTE_CARD_IMAGE, timeout=20
+        )
+
+        for i, (element, image_path) in enumerate(
+            zip(note_card_elements, baseline_image_paths)
+        ):
+            captured = capture_element_image(self.page.driver, element)
+            baseline = load_baseline_image(image_path)
+            score = compare_images(captured, baseline)
+            passed = is_similar(score)
+            status = "PASS" if passed else "FAIL"
+            color = "green" if passed else "red"
+
+            print(
+                f"[Checkpoint] Image comparison card={i+1}, "
+                f"score={score:.2%}, threshold={SSIM_THRESHOLD:.0%}, status={status}"
+            )
+
+            extras.append(html_extras.html(
+                f"<div style='margin:8px 0'>"
+                f"<b>Card {i+1} similarity</b>: {score:.2%} "
+                f"→ <b style='color:{color}'>{status}</b><br/>"
+                f"<img src='{image_to_base64_src(captured)}' width='200' style='margin-right:8px'/>"
+                f"<img src='{image_to_base64_src(baseline)}' width='200'/>"
+                f"</div>"
+            ))
+
+            assert passed, (
+                f"Image similarity too low. "
+                f"card={i+1}, score={score:.2%}, threshold={SSIM_THRESHOLD:.0%}"
+            )
 
     def get_expected_card_count(self, caries_count: int) -> int:
         """기대 Note 개수 계산"""
