@@ -82,9 +82,6 @@ class CheckpointTask:
     def enter_edit_flow(
         self,
         caries_count: int,
-        # scan_type: str,
-        # diagnosis_name: str,
-        # treatment_name: str
     ):
         """기존 Note Edit 진입"""
 
@@ -203,14 +200,19 @@ class CheckpointTask:
         baseline_image_paths: list[str],
         extras: list,
     ):
-        """Note card thumbnail vs baseline 이미지 SSIM 비교"""
+        """Note card thumbnail vs baseline 이미지 SSIM 비교.
+
+        UPDATE_BASELINES=true 환경변수 시 비교 대신 현재 캡처를 베이스라인으로 저장.
+        """
         from Utils.image_comparator import (
-            capture_element_image,
-            load_baseline_image,
-            compare_images,
-            is_similar,
-            image_to_base64_src,
+            UPDATE_BASELINES,
             SSIM_THRESHOLD,
+            capture_element_image,
+            compare_images,
+            image_to_base64_src,
+            is_similar,
+            load_baseline_image,
+            save_baseline,
         )
         from pytest_html import extras as html_extras
 
@@ -218,10 +220,24 @@ class CheckpointTask:
             self.page.NOTE_CARD_IMAGE, timeout=20
         )
 
+        failures = []
+
         for i, (element, image_path) in enumerate(
             zip(note_card_elements, baseline_image_paths)
         ):
             captured = capture_element_image(self.page.driver, element)
+
+            if UPDATE_BASELINES:
+                save_baseline(captured, image_path)
+                print(f"[Checkpoint] Baseline updated: card={i+1}, path={image_path}")
+                if extras is not None:
+                    extras.append(html_extras.html(
+                        f"<div style='margin:4px 0;color:#1a73e8'>"
+                        f"Baseline updated: Card {i+1} → {image_path}"
+                        f"</div>"
+                    ))
+                continue
+
             baseline = load_baseline_image(image_path)
             score = compare_images(captured, baseline)
             passed = is_similar(score)
@@ -233,18 +249,27 @@ class CheckpointTask:
                 f"score={score:.2%}, threshold={SSIM_THRESHOLD:.0%}, status={status}"
             )
 
-            extras.append(html_extras.html(
-                f"<div style='margin:8px 0'>"
-                f"<b>Card {i+1} similarity</b>: {score:.2%} "
-                f"→ <b style='color:{color}'>{status}</b><br/>"
-                f"<img src='{image_to_base64_src(captured)}' width='200' style='margin-right:8px'/>"
-                f"<img src='{image_to_base64_src(baseline)}' width='200'/>"
-                f"</div>"
-            ))
+            if extras is not None:
+                extras.append(html_extras.html(
+                    f"<div style='margin:8px 0'>"
+                    f"<b>Card {i+1} similarity</b>: {score:.2%} "
+                    f"→ <b style='color:{color}'>{status}</b> "
+                    f"(threshold {SSIM_THRESHOLD:.0%})<br/>"
+                    f"<img src='{image_to_base64_src(captured)}' width='200' "
+                    f"style='margin-right:8px' title='Captured'/>"
+                    f"<img src='{image_to_base64_src(baseline)}' width='200' "
+                    f"title='Baseline'/>"
+                    f"</div>"
+                ))
 
-            assert passed, (
-                f"Image similarity too low. "
-                f"card={i+1}, score={score:.2%}, threshold={SSIM_THRESHOLD:.0%}"
+            if not passed:
+                failures.append(
+                    f"card={i+1}, score={score:.2%}, threshold={SSIM_THRESHOLD:.0%}"
+                )
+
+        if failures:
+            raise AssertionError(
+                "Image similarity too low.\n" + "\n".join(failures)
             )
 
     def get_expected_card_count(self, caries_count: int) -> int:
@@ -368,18 +393,6 @@ class CheckpointTask:
             expected_scan_image_count[scan_type]
         )
 
-        # actual_note_count = (
-        #     self.page.get_preview_note_card_count()
-        # )
-
-        # print(
-        #     f"[Checkpoint] Preview note count. "
-        #     f"expected={expected_note_count}, "
-        #     f"actual={actual_note_count}"
-        # )
-
-        # assert actual_note_count == expected_note_count
-
         assert self.page.is_text_displayed(diagnosis_name)
         assert self.page.is_text_displayed(treatment_name)
 
@@ -419,3 +432,64 @@ class CheckpointTask:
         self.page.click_preview_finalize()
 
         print("[Checkpoint] Preview Finalize clicked.")
+
+    def validate_pdf_report(
+        self,
+        expected_texts: list[str],
+        extras: list | None = None,
+    ):
+        """PDF 생성 후 텍스트 포함 여부를 검증하고 HTML 리포트에 결과를 기록."""
+        from Utils.pdf_validator import validate_pdf_text, render_pdf_page
+        from Utils.image_comparator import image_to_base64_src
+        from pytest_html import extras as html_extras
+
+        print("[Checkpoint] Waiting for PDF generation...")
+        self.page.wait_until_pdf_generated()
+
+        print("[Checkpoint] Downloading PDF content...")
+        try:
+            pdf_bytes = self.page.get_pdf_bytes()
+        except Exception as e:
+            msg = f"PDF 다운로드 실패: {e}"
+            print(f"[Checkpoint] {msg}")
+            if extras is not None:
+                extras.append(html_extras.html(
+                    f"<div style='color:#ea4335;padding:6px'>{msg}</div>"
+                ))
+            raise
+
+        # ── 텍스트 검증 ──────────────────────────────────────────
+        results = validate_pdf_text(pdf_bytes, expected_texts)
+        failures = []
+
+        for text, found in results.items():
+            status = "PASS" if found else "FAIL"
+            color = "green" if found else "red"
+            print(f"[Checkpoint] PDF text '{text}' → {status}")
+            if extras is not None:
+                extras.append(html_extras.html(
+                    f"<div style='margin:3px 0;font-size:12px'>"
+                    f"PDF text: <b>{text}</b> → "
+                    f"<b style='color:{color}'>{status}</b>"
+                    f"</div>"
+                ))
+            if not found:
+                failures.append(text)
+
+        # ── PDF 1페이지 썸네일 리포트에 첨부 ──────────────────────
+        try:
+            page_img = render_pdf_page(pdf_bytes, page_index=0)
+            if extras is not None:
+                extras.append(html_extras.html(
+                    f"<div style='margin:6px 0'>"
+                    f"<b>PDF Page 1</b><br/>"
+                    f"<img src='{image_to_base64_src(page_img)}' "
+                    f"style='max-width:600px;border:1px solid #ddd'/>"
+                    f"</div>"
+                ))
+        except Exception as e:
+            print(f"[Checkpoint] PDF page rendering skipped: {e}")
+
+        assert not failures, (
+            f"PDF text validation failed. Missing: {failures}"
+        )

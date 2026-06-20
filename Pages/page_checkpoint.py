@@ -5,6 +5,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
 from Pages.page_base import BasePage
+from Utils.pdf_validator import get_pdf_bytes as _get_pdf_bytes
 
 
 class CheckpointPage(BasePage):
@@ -499,24 +500,6 @@ class CheckpointPage(BasePage):
             timeout=20
         )
 
-        print(f"[DEBUG] preview note card raw count={len(cards)}")
-
-        for index, card in enumerate(cards):
-            print(
-                f"[DEBUG] preview note card[{index}] "
-                f"text={card.text}"
-            )
-
-        return len(cards)
-
-    def get_preview_note_card_count(self) -> int:
-        """Preview note card 개수 반환"""
-
-        cards = self.find_all_present(
-            self.PREVIEW_NOTE_CARDS,
-            timeout=20
-        )
-
         return len(cards)
 
     def is_text_displayed(self, text: str) -> bool:
@@ -534,6 +517,10 @@ class CheckpointPage(BasePage):
     # ============================================================
 
     def wait_until_pdf_generated(self):
-        """PDF 생성 확인"""
-
+        """PDF 뷰어 표시 대기"""
         self.wait_until_visible(self.PDF_VIEWER, timeout=60)
+
+    def get_pdf_bytes(self) -> bytes:
+        """PDF 뷰어(iframe/embed)에서 PDF 바이트를 추출"""
+        pdf_element = self.find_visible(self.PDF_VIEWER, timeout=60)
+        return _get_pdf_bytes(self.driver, pdf_element)
