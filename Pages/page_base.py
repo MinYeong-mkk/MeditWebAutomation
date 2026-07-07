@@ -79,7 +79,11 @@ class BasePage:
 
     def clear_input_by_keyboard(self, locator, timeout: int | None = None):
         element = self.find_visible(locator, timeout=timeout)
-        element.click()
+        self.scroll_to_element(element)
+        try:
+            element.click()
+        except Exception:
+            self.driver.execute_script("arguments[0].click();", element)
         element.send_keys(Keys.CONTROL, "a")
         element.send_keys(Keys.BACKSPACE)
         return element
@@ -107,8 +111,11 @@ class BasePage:
 
     def is_visible(self, locator, timeout: int | None = None) -> bool:
         try:
-            return self.find_visible(locator, timeout=timeout).is_displayed()
+            element = self.find_visible(locator, timeout=timeout)
+            return element is not None and element.is_displayed()
         except TimeoutException:
+            return False
+        except Exception:
             return False
 
     def wait_until_invisible(self, locator, timeout: int | None = None):

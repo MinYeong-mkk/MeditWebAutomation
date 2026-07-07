@@ -1,8 +1,21 @@
+import itertools
 import time
 
 from selenium.common.exceptions import TimeoutException
 
 from Pages.page_checkpoint import CheckpointPage
+from Utils.image_utils import (
+    UPDATE_BASELINES,
+    capture_element_image,
+    load_baseline_image,
+    save_baseline,
+)
+from Utils.image_matcher import IMAGE_MATCH_THRESHOLD, find_best_image_match
+from Utils.pdf_report_validator import PdfReportValidator
+from Utils.report_builder import ReportBuilder
+
+
+MAX_EXHAUSTIVE_IMAGE_ASSIGNMENT = 8
 
 # ============================================================
 # Tooth Number Mapping
@@ -31,6 +44,7 @@ TOOTH_NUMBERS_BY_SCAN_TYPE = {
 class CheckpointTask:
     def __init__(self, driver):
         self.page = CheckpointPage(driver)
+        self._image_failures: list[str] = []
 
     # ============================================================
     # Entry Flow
@@ -43,8 +57,8 @@ class CheckpointTask:
         scan_type: str,
         diagnosis_name: str,
         treatment_name: str,
-        baseline_image_paths: list[str] | None = None,  # 추가
-        extras: list | None = None,    
+        baseline_image_paths: list[str] | None = None,
+        extras: list | None = None,
     ):
         """CheckPoint 작업 영역 진입"""
 
@@ -155,7 +169,6 @@ class CheckpointTask:
 
         if caries_count > 0:
             print("[Checkpoint] Caries exists. Accept review popup.")
-            self.page.wait_until_review_popup_visible()
             self.page.accept_review_popup()
 
         else:
@@ -183,9 +196,11 @@ class CheckpointTask:
         )
         # ★ 이미지 유사도 비교 (caries 자동 캡처 케이스만)
         if caries_count > 0 and baseline_image_paths:
+            # 썸네일이 실제로 로딩된 뒤 캡처해야 0% 오류 방지
+            self.page.wait_until_note_card_images_loaded()
             self._compare_note_card_images(
                 baseline_image_paths=baseline_image_paths,
-                extras=extras or [],
+                report=ReportBuilder(extras),
             )
 
         self.complete_note_forms(
@@ -198,79 +213,99 @@ class CheckpointTask:
     def _compare_note_card_images(
         self,
         baseline_image_paths: list[str],
-        extras: list,
+        report: ReportBuilder,
     ):
-        """Note card thumbnail vs baseline 이미지 SSIM 비교.
+        """Note card thumbnail 내부에서 baseline 이미지를 다중 크기로 탐색.
 
         UPDATE_BASELINES=true 환경변수 시 비교 대신 현재 캡처를 베이스라인으로 저장.
         """
-        from Utils.image_comparator import (
-            UPDATE_BASELINES,
-            SSIM_THRESHOLD,
-            capture_element_image,
-            compare_images,
-            image_to_base64_src,
-            is_similar,
-            load_baseline_image,
-            save_baseline,
-        )
-        from pytest_html import extras as html_extras
-
         note_card_elements = self.page.find_all_present(
             self.page.NOTE_CARD_IMAGE, timeout=20
         )
 
-        failures = []
-
-        for i, (element, image_path) in enumerate(
-            zip(note_card_elements, baseline_image_paths)
-        ):
+        captured_images = []
+        for i, element in enumerate(note_card_elements[:len(baseline_image_paths)]):
+            self.page.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
             captured = capture_element_image(self.page.driver, element)
+            captured_images.append(captured)
 
             if UPDATE_BASELINES:
+                image_path = baseline_image_paths[i]
                 save_baseline(captured, image_path)
                 print(f"[Checkpoint] Baseline updated: card={i+1}, path={image_path}")
-                if extras is not None:
-                    extras.append(html_extras.html(
-                        f"<div style='margin:4px 0;color:#1a73e8'>"
-                        f"Baseline updated: Card {i+1} → {image_path}"
-                        f"</div>"
-                    ))
-                continue
+                report.add_check(
+                    f"Baseline updated: Card {i + 1}",
+                    image_path,
+                )
+        if UPDATE_BASELINES:
+            return
 
-            baseline = load_baseline_image(image_path)
-            score = compare_images(captured, baseline)
-            passed = is_similar(score)
-            status = "PASS" if passed else "FAIL"
-            color = "green" if passed else "red"
+        baselines = [
+            (image_path, load_baseline_image(image_path))
+            for image_path in baseline_image_paths
+        ]
+        scores = [
+            [
+                find_best_image_match([captured], baseline, color_power=0.0).score
+                for _, baseline in baselines
+            ]
+            for captured in captured_images
+        ]
+
+        assignment = self._best_image_assignment(scores)
+
+        for card_index, baseline_index in enumerate(assignment):
+            captured = captured_images[card_index]
+            image_path, baseline = baselines[baseline_index]
+            score = scores[card_index][baseline_index]
+            status = "PASS" if score >= IMAGE_MATCH_THRESHOLD else "FAIL"
 
             print(
-                f"[Checkpoint] Image comparison card={i+1}, "
-                f"score={score:.2%}, threshold={SSIM_THRESHOLD:.0%}, status={status}"
+                f"[Checkpoint] Image comparison card={card_index+1}, "
+                f"baseline={image_path}, score={score:.2%}, "
+                f"threshold={IMAGE_MATCH_THRESHOLD:.0%}, status={status}"
+            )
+            report.add_image_result(
+                title=f"Card {card_index + 1} similarity",
+                score=score,
+                threshold=IMAGE_MATCH_THRESHOLD,
+                expected_image=baseline,
+                actual_image=captured,
+                details=f"(baseline {image_path})",
             )
 
-            if extras is not None:
-                extras.append(html_extras.html(
-                    f"<div style='margin:8px 0'>"
-                    f"<b>Card {i+1} similarity</b>: {score:.2%} "
-                    f"→ <b style='color:{color}'>{status}</b> "
-                    f"(threshold {SSIM_THRESHOLD:.0%})<br/>"
-                    f"<img src='{image_to_base64_src(captured)}' width='200' "
-                    f"style='margin-right:8px' title='Captured'/>"
-                    f"<img src='{image_to_base64_src(baseline)}' width='200' "
-                    f"title='Baseline'/>"
-                    f"</div>"
-                ))
-
-            if not passed:
-                failures.append(
-                    f"card={i+1}, score={score:.2%}, threshold={SSIM_THRESHOLD:.0%}"
+            if score < IMAGE_MATCH_THRESHOLD:
+                self._image_failures.append(
+                    f"card={card_index+1}, baseline={image_path}, "
+                    f"score={score:.2%}, "
+                    f"threshold={IMAGE_MATCH_THRESHOLD:.0%}"
                 )
 
-        if failures:
-            raise AssertionError(
-                "Image similarity too low.\n" + "\n".join(failures)
-            )
+    def _best_image_assignment(self, scores: list[list[float]]) -> list[int]:
+        """카드 순서가 바뀌어도 전체 유사도가 가장 높은 baseline 매칭을 선택."""
+        card_count = len(scores)
+        baseline_count = len(scores[0]) if scores else 0
+
+        if card_count == 0 or baseline_count == 0:
+            return []
+
+        if card_count <= MAX_EXHAUSTIVE_IMAGE_ASSIGNMENT:
+            best_assignment = None
+            best_total = -1.0
+            for assignment in itertools.permutations(range(baseline_count), card_count):
+                total = sum(scores[card_index][baseline_index] for card_index, baseline_index in enumerate(assignment))
+                if total > best_total:
+                    best_total = total
+                    best_assignment = assignment
+            return list(best_assignment)
+
+        remaining = set(range(baseline_count))
+        assignment = []
+        for row in scores:
+            best_baseline = max(remaining, key=lambda baseline_index: row[baseline_index])
+            assignment.append(best_baseline)
+            remaining.remove(best_baseline)
+        return assignment
 
     def get_expected_card_count(self, caries_count: int) -> int:
         """기대 Note 개수 계산"""
@@ -344,14 +379,19 @@ class CheckpointTask:
             assert maxilla_visible is False, "Maxilla should not be visible."
 
         elif scan_type == "both":
-            assert maxilla_visible is True, "Maxilla should be visible."
-            assert mandible_visible is True, "Mandible should be visible."
+            assert self.page.has_maxilla_tree_item() is True, "Maxilla should be present."
+            assert self.page.has_mandible_tree_item() is True, "Mandible should be present."
 
         else:
             raise ValueError(f"Invalid scan_type: {scan_type}")
         
     def open_preview(self):
         """Preview modal open"""
+
+        if not self.page.is_finalize_enabled():
+            print("[Checkpoint] Finalize button is not visible. Open review.")
+            self.page.click_first_review_button()
+            self.page.wait_after_note_form_input()
 
         assert self.page.is_finalize_enabled(), (
             "Finalize button should be enabled before opening preview."
@@ -382,6 +422,7 @@ class CheckpointTask:
         actual_scan_image_count = (
             self.page.get_preview_scan_image_count()
         )
+        actual_note_count = self.page.get_preview_note_card_count()
 
         print(
             f"[Checkpoint] Preview scan image count. "
@@ -391,6 +432,10 @@ class CheckpointTask:
 
         assert actual_scan_image_count == (
             expected_scan_image_count[scan_type]
+        )
+        assert actual_note_count >= expected_note_count, (
+            "Preview note count mismatch. "
+            f"expected_at_least={expected_note_count}, actual={actual_note_count}"
         )
 
         assert self.page.is_text_displayed(diagnosis_name)
@@ -433,63 +478,24 @@ class CheckpointTask:
 
         print("[Checkpoint] Preview Finalize clicked.")
 
+    def assert_no_image_failures(self):
+        """누적된 이미지 유사도 실패를 TC 마지막에 일괄 assert."""
+        if self._image_failures:
+            failures = self._image_failures[:]
+            self._image_failures.clear()
+            raise AssertionError(
+                "Image similarity too low.\n" + "\n".join(failures)
+            )
+
     def validate_pdf_report(
         self,
         expected_texts: list[str],
+        expected_image_paths: list[str] | None = None,
         extras: list | None = None,
     ):
-        """PDF 생성 후 텍스트 포함 여부를 검증하고 HTML 리포트에 결과를 기록."""
-        from Utils.pdf_validator import validate_pdf_text, render_pdf_page
-        from Utils.image_comparator import image_to_base64_src
-        from pytest_html import extras as html_extras
-
-        print("[Checkpoint] Waiting for PDF generation...")
-        self.page.wait_until_pdf_generated()
-
-        print("[Checkpoint] Downloading PDF content...")
-        try:
-            pdf_bytes = self.page.get_pdf_bytes()
-        except Exception as e:
-            msg = f"PDF 다운로드 실패: {e}"
-            print(f"[Checkpoint] {msg}")
-            if extras is not None:
-                extras.append(html_extras.html(
-                    f"<div style='color:#ea4335;padding:6px'>{msg}</div>"
-                ))
-            raise
-
-        # ── 텍스트 검증 ──────────────────────────────────────────
-        results = validate_pdf_text(pdf_bytes, expected_texts)
-        failures = []
-
-        for text, found in results.items():
-            status = "PASS" if found else "FAIL"
-            color = "green" if found else "red"
-            print(f"[Checkpoint] PDF text '{text}' → {status}")
-            if extras is not None:
-                extras.append(html_extras.html(
-                    f"<div style='margin:3px 0;font-size:12px'>"
-                    f"PDF text: <b>{text}</b> → "
-                    f"<b style='color:{color}'>{status}</b>"
-                    f"</div>"
-                ))
-            if not found:
-                failures.append(text)
-
-        # ── PDF 1페이지 썸네일 리포트에 첨부 ──────────────────────
-        try:
-            page_img = render_pdf_page(pdf_bytes, page_index=0)
-            if extras is not None:
-                extras.append(html_extras.html(
-                    f"<div style='margin:6px 0'>"
-                    f"<b>PDF Page 1</b><br/>"
-                    f"<img src='{image_to_base64_src(page_img)}' "
-                    f"style='max-width:600px;border:1px solid #ddd'/>"
-                    f"</div>"
-                ))
-        except Exception as e:
-            print(f"[Checkpoint] PDF page rendering skipped: {e}")
-
-        assert not failures, (
-            f"PDF text validation failed. Missing: {failures}"
+        """PDF 검증 서비스로 위임한다."""
+        validator = PdfReportValidator(
+            page=self.page,
+            report=ReportBuilder(extras),
         )
+        return validator.validate(expected_texts, expected_image_paths)

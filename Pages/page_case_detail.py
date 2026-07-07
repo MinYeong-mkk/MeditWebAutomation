@@ -50,6 +50,7 @@ class CaseDetailPage(BasePage):
     def wait_until_detail_loaded(self):
         self.wait_for_url_contains("/casebox/detail")
         self.wait_until_visible(self.DETAIL_TITLE, timeout=20)
+        self.wait_until_visible(self.CHECKPOINT_ICON, timeout=30)
 
     def click_checkpoint(self) -> tuple[str, str]:
         original_handle = self.driver.current_window_handle

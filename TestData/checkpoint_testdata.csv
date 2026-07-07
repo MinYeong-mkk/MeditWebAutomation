@@ -4,14 +4,4 @@ CP-002,AutomationTest002,6383880,both,new_note,1,Missing Tooth,Pontic,1,"""63838
 CP-003,AutomationTest003,6385795,both,new_note,7,Veneer,Veneer,2,"""6385795_01.png, 6385795_02.png, 6385795_03.png, 6385795_04.png, 6385795_05.png, 6385795_06.png, 6385795_07.png"""
 CP-004,AutomationTest004,6385800,maxilla,direct,0,Deep Overjet,Splints,0,
 CP-005,AutomationTest005,6385797,both,edit,0,Implant,Crown,2,
-,,,,,,,,,
-,,,,,,,,,
-,,,,,,,,,
-,,,,,,,,,
-,,,,,,,,,
-,,,,,,,,,
-,,,,,,,,,
-,,,,,,,,,
-,,,,,,,,,
-,,,,,,,,,
-,,,,,,,,,
+CP-Fail,AutomationTest002,6383880,both,new_note,1,Missing Tooth,Pontic,1,"""fail.jpg"""

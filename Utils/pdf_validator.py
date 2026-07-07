@@ -1,9 +1,13 @@
 import base64
 
 import fitz  # PyMuPDF
-import numpy as np
 import cv2
+import numpy as np
 import requests
+
+
+MIN_PDF_IMAGE_WIDTH = 240
+MIN_PDF_IMAGE_HEIGHT = 240
 
 
 def get_pdf_bytes(driver, pdf_element) -> bytes:
@@ -49,6 +53,58 @@ def get_pdf_bytes(driver, pdf_element) -> bytes:
     return resp.content
 
 
+def _decode_pdf_image(image_bytes: bytes) -> np.ndarray | None:
+    arr = np.frombuffer(image_bytes, dtype=np.uint8)
+    image = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
+    if image is None:
+        return None
+
+    if image.ndim == 2:
+        return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+
+    if image.shape[2] == 4:
+        return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+
+    if image.shape[2] == 3:
+        return image
+
+    return None
+
+
+def extract_pdf_images(
+    pdf_bytes: bytes,
+    min_width: int = MIN_PDF_IMAGE_WIDTH,
+    min_height: int = MIN_PDF_IMAGE_HEIGHT,
+) -> list[np.ndarray]:
+    """PDF에 embedded된 raster image 후보를 BGR 이미지로 추출."""
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    images = []
+    seen_xrefs = set()
+
+    try:
+        for page in doc:
+            for image_info in page.get_images(full=True):
+                xref = image_info[0]
+                if xref in seen_xrefs:
+                    continue
+                seen_xrefs.add(xref)
+
+                extracted = doc.extract_image(xref)
+                image = _decode_pdf_image(extracted.get("image", b""))
+                if image is None:
+                    continue
+
+                height, width = image.shape[:2]
+                if width < min_width or height < min_height:
+                    continue
+
+                images.append(image)
+    finally:
+        doc.close()
+
+    return images
+
+
 def validate_pdf_text(pdf_bytes: bytes, expected_texts: list[str]) -> dict[str, bool]:
     """PDF 전체 텍스트에서 각 문자열 포함 여부를 반환."""
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -57,31 +113,34 @@ def validate_pdf_text(pdf_bytes: bytes, expected_texts: list[str]) -> dict[str, 
     return {text: text in full_text for text in expected_texts}
 
 
-def render_pdf_page(pdf_bytes: bytes, page_index: int = 0, dpi: int = 150) -> np.ndarray:
-    """PDF 특정 페이지를 numpy 이미지(BGR)로 렌더링."""
+def render_pdf_pages(pdf_bytes: bytes, dpi: int = 150) -> list[np.ndarray]:
+    """PDF 전체 페이지를 BGR 이미지로 렌더링."""
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    page = doc[page_index]
     mat = fitz.Matrix(dpi / 72, dpi / 72)
-    pix = page.get_pixmap(matrix=mat)
-    arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-    doc.close()
-
-    if arr.shape[2] == 4:
-        return cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
-    return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-
-
-def extract_embedded_images(pdf_bytes: bytes) -> list[np.ndarray]:
-    """PDF에 임베드된 이미지를 numpy 배열 리스트로 반환."""
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     images = []
     for page in doc:
-        for img_info in page.get_images():
-            xref = img_info[0]
-            base_img = doc.extract_image(xref)
-            arr = np.frombuffer(base_img["image"], dtype=np.uint8)
-            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            if img is not None:
-                images.append(img)
+        pix = page.get_pixmap(matrix=mat)
+        arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+            pix.height,
+            pix.width,
+            pix.n,
+        )
+        color_code = cv2.COLOR_RGBA2BGR if pix.n == 4 else cv2.COLOR_RGB2BGR
+        images.append(cv2.cvtColor(arr, color_code))
     doc.close()
     return images
+
+
+def recognize_pdf_text(pdf_pages: list[np.ndarray]) -> str:
+    """RapidOCR로 렌더링된 PDF 페이지의 텍스트를 인식."""
+    from rapidocr_onnxruntime import RapidOCR
+
+    engine = RapidOCR()
+    recognized_lines = []
+    for page in pdf_pages:
+        results, _ = engine(page)
+        recognized_lines.extend(
+            item[1] for item in (results or [])
+            if len(item) > 1 and item[1]
+        )
+    return "\n".join(recognized_lines)

@@ -4,6 +4,6 @@ webdriver-manager==4.0.2
 pytest-html==4.1.1
 python-dotenv==1.0.1
 opencv-python
-scikit-image
 pymupdf
+rapidocr-onnxruntime
 requests

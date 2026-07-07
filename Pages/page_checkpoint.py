@@ -1,5 +1,6 @@
 import time
 
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -89,6 +90,11 @@ class CheckpointPage(BasePage):
         "//button[.//span[normalize-space()='Finalize']]"
     )
 
+    CLICK_TO_REVIEW_BUTTON = (
+        By.XPATH,
+        "//*[normalize-space()='Click to review']"
+    )
+
     # Capture toolbar 버튼
     CAPTURE_TOOLBAR_BUTTON = (
         By.XPATH,
@@ -162,6 +168,8 @@ class CheckpointPage(BasePage):
 
     PREVIEW_FINALIZE_BUTTON = (
         By.XPATH,
+        "//input[@placeholder='Note title']"
+        "/ancestor::*[.//button[.//span[normalize-space()='Finalize']]][1]"
         "//button[.//span[normalize-space()='Finalize']]"
     )
 
@@ -214,8 +222,16 @@ class CheckpointPage(BasePage):
     # ============================================================
 
     def wait_until_loaded(self):
-        """CheckPoint URL 대기"""
+        """CheckPoint URL 대기 + 초기 UI 렌더링 대기"""
         self.wait_for_url_contains(self.CHECKPOINT_URL_KEYWORD, timeout=30)
+        # URL 도달 후 앱이 실제로 화면을 렌더링할 때까지 대기
+        WebDriverWait(self.driver, 30).until(
+            lambda d: (
+                d.find_elements(*self.NEW_NOTE_BUTTON)
+                or d.find_elements(*self.FIRST_NOTE_CARD)
+                or d.find_elements(*self.CAPTURE_TOOLBAR_BUTTON)
+            )
+        )
 
     def has_new_note_button(self) -> bool:
         """New Note 버튼 표시 여부"""
@@ -241,14 +257,9 @@ class CheckpointPage(BasePage):
         """Import loading 종료 대기"""
         self.wait_until_invisible(self.IMPORT_PROGRESS_TEXT, timeout=180)
 
-    def wait_until_review_popup_visible(self):
-        """Review popup 표시 대기"""
-        self.wait_until_visible(self.REVIEW_POPUP, timeout=60)
-
     def accept_review_popup(self):
         """Review popup Yes 클릭"""
-        yes_button = self.find_visible(self.REVIEW_YES_BUTTON, timeout=30)
-        self.js_click_element(yes_button)
+        self.click(self.REVIEW_YES_BUTTON, timeout=60)
         self.wait_until_invisible(self.REVIEW_POPUP, timeout=15)
 
     # ============================================================
@@ -257,7 +268,7 @@ class CheckpointPage(BasePage):
 
     def start_new_note(self):
         """New Note 클릭"""
-        self.click(self.NEW_NOTE_BUTTON)
+        self.click(self.NEW_NOTE_BUTTON, timeout=30)
 
     def select_first_note(self):
         """첫 번째 Note 선택"""
@@ -290,7 +301,7 @@ class CheckpointPage(BasePage):
         self.click(self.DELETE_BUTTON)
 
         print("[Checkpoint] Waiting for note deletion...")
-        time.sleep(10)
+        self.wait_until_invisible(self.FIRST_NOTE_CARD, timeout=15)
 
     # ============================================================
     # Diagnosis Action
@@ -298,8 +309,8 @@ class CheckpointPage(BasePage):
 
     def manual_capture(self):
         """수동 Capture 수행"""
-        self.click(self.CAPTURE_TOOLBAR_BUTTON)
-        self.wait_until_visible(self.CAPTURE_CONFIRM_BUTTON, timeout=10)
+        self.click(self.CAPTURE_TOOLBAR_BUTTON, timeout=30)
+        self.wait_until_visible(self.CAPTURE_CONFIRM_BUTTON, timeout=30)
         self.click(self.CAPTURE_CONFIRM_BUTTON)
     
     def select_note_card_by_index(self, index: int):
@@ -348,12 +359,7 @@ class CheckpointPage(BasePage):
 
     def wait_after_note_form_input(self):
         """Note form 입력 후 반영 대기"""
-        time.sleep(1)
-
-    def click_finalize(self):
-        """Finalize 클릭"""
-        self.click(self.FINALIZE_BUTTON)
-    
+        time.sleep(0.3)
 
     # ============================================================
     # Note Verification
@@ -383,6 +389,21 @@ class CheckpointPage(BasePage):
         """Note 썸네일 표시 여부"""
         return self.is_visible(self.NOTE_CARD_IMAGE, timeout=10)
 
+    def wait_until_note_card_images_loaded(self):
+        """모든 Note card thumbnail이 실제로 렌더링될 때까지 대기 (naturalWidth > 0)"""
+        def all_loaded(driver):
+            imgs = driver.find_elements(*self.NOTE_CARD_IMAGE)
+            if not imgs:
+                return False
+            return all(
+                driver.execute_script(
+                    "return arguments[0].complete && arguments[0].naturalWidth > 0",
+                    img,
+                )
+                for img in imgs
+            )
+        WebDriverWait(self.driver, 30).until(all_loaded)
+
     # ============================================================
     # Data Tree Verification
     # ============================================================
@@ -394,6 +415,20 @@ class CheckpointPage(BasePage):
     def is_mandible_visible(self) -> bool:
         """Mandible 표시 여부"""
         return self.is_visible(self.MANDIBLE_TREE_ITEM, timeout=5)
+
+    def has_maxilla_tree_item(self) -> bool:
+        """Maxilla tree item DOM 존재 여부"""
+        try:
+            return self.find_present(self.MAXILLA_TREE_ITEM, timeout=5) is not None
+        except Exception:
+            return False
+
+    def has_mandible_tree_item(self) -> bool:
+        """Mandible tree item DOM 존재 여부"""
+        try:
+            return self.find_present(self.MANDIBLE_TREE_ITEM, timeout=5) is not None
+        except Exception:
+            return False
     
 
     # ============================================================
@@ -407,7 +442,10 @@ class CheckpointPage(BasePage):
     def is_finalize_enabled(self) -> bool:
         """Finalize 활성화 여부"""
 
-        button = self.find_visible(self.FINALIZE_BUTTON, timeout=10)
+        try:
+            button = self.find_visible_finalize_button(timeout=10)
+        except TimeoutException:
+            return False
 
         disabled = button.get_attribute("disabled")
         aria_disabled = button.get_attribute("aria-disabled")
@@ -419,6 +457,55 @@ class CheckpointPage(BasePage):
         )
 
         return disabled is None and aria_disabled != "true"
+
+    def find_visible_finalize_button(self, timeout: int = 10):
+        """화면에 표시된 Finalize 버튼 반환"""
+        WebDriverWait(self.driver, timeout).until(
+            lambda driver: self._has_visible_finalize_button_after_scroll(driver)
+        )
+        for button in self.driver.find_elements(*self.FINALIZE_BUTTON):
+            if button.is_displayed():
+                return button
+        raise TimeoutException("Visible Finalize button was not found.")
+
+    def _has_visible_finalize_button_after_scroll(self, driver) -> bool:
+        if any(
+            button.is_displayed()
+            for button in driver.find_elements(*self.FINALIZE_BUTTON)
+        ):
+            return True
+
+        driver.execute_script(
+            """
+            for (const element of document.querySelectorAll('*')) {
+                if (element.scrollHeight > element.clientHeight) {
+                    element.scrollTop = element.scrollHeight;
+                }
+            }
+            """
+        )
+        return any(
+            button.is_displayed()
+            for button in driver.find_elements(*self.FINALIZE_BUTTON)
+        )
+
+    def click_finalize(self):
+        """Finalize 클릭"""
+        button = self.find_visible_finalize_button(timeout=10)
+        self.scroll_to_element(button)
+        try:
+            button.click()
+        except Exception:
+            self.driver.execute_script("arguments[0].click();", button)
+
+    def click_first_review_button(self):
+        """첫 번째 Click to review 버튼 클릭"""
+        button = self.find_visible(self.CLICK_TO_REVIEW_BUTTON, timeout=10)
+        self.scroll_to_element(button)
+        try:
+            button.click()
+        except Exception:
+            self.driver.execute_script("arguments[0].click();", button)
     
     def is_preview_finalize_enabled(self) -> bool:
         """Preview Finalize 활성화 여부"""
@@ -438,8 +525,8 @@ class CheckpointPage(BasePage):
     def click_preview_finalize(self):
         """Finalize 클릭"""
 
-        assert self.is_finalize_enabled(), (
-            "Finalize button should be enabled before click."
+        assert self.is_preview_finalize_enabled(), (
+            "Preview Finalize button should be enabled before click."
         )
 
         self.click(self.PREVIEW_FINALIZE_BUTTON)

@@ -83,17 +83,6 @@ def driver(request):
 
     driver.quit()
 
-@pytest.fixture
-def extras(request):
-    """pytest-html extras fixture — TC별 유사도/이미지/에러 inject"""
-    _extras = []
-    yield _extras
-
-    # pytest-html이 report에 extras 붙이는 방식
-    if hasattr(request.node, "stash"):
-        from pytest_html.plugin import extras as stash_key
-        request.node.stash[stash_key] = _extras
-
 def pytest_html_report_title(report):
     report.title = "Checkpoint QA Automation Report"
 
@@ -107,8 +96,7 @@ def pytest_configure(config):
 
 
 def pytest_html_results_summary(prefix, summary, postfix):
-    from pytest_html import extras
-    prefix.extend([extras.html("""
+    prefix.extend(["""
     <style>
         body { font-family: 'Segoe UI', sans-serif; background: #f9f9f9; color: #222; }
         #report-header { background: #fff; border-bottom: 3px solid #1a73e8; padding: 16px 24px; }
@@ -125,5 +113,15 @@ def pytest_html_results_summary(prefix, summary, postfix):
         .error  { color: #fff; background: #f29900; border-radius: 4px; padding: 2px 10px; font-weight: 600; }
         div.extraHTML { padding: 8px 0; }
         div.extraHTML div { border-left: 3px solid #1a73e8; padding-left: 12px; margin: 6px 0; }
+        .qa-guide { background:#fff; border:1px solid #dfe3e8; border-radius:6px;
+                    padding:12px 16px; margin:10px 0 14px; font-size:13px; }
+        .qa-guide span { display:inline-block; margin-right:18px; }
     </style>
-    """)])
+    <div class="qa-guide">
+      <b>Result guide</b><br/>
+      <span style="color:#188038">PASS: 모든 필수 검증 일치</span>
+      <span style="color:#d93025">FAIL: 기대값 불일치</span>
+      <span style="color:#e37400">ERROR: 환경 또는 자동화 실행 오류</span><br/>
+      각 테스트 행 아래에서 단계별 검증 결과와 비교 이미지를 확인할 수 있습니다.
+    </div>
+    """])
